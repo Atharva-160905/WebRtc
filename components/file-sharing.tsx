@@ -12,6 +12,8 @@ import { Progress } from "@/components/ui/progress"
 import { ArrowDownToLine, ArrowUpFromLine, Copy, LinkIcon, Loader2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
+const CHUNK_SIZE = 16 * 1024 // 16KB chunks
+
 export default function FileSharing() {
   // Connection states
   const [myPeerId, setMyPeerId] = useState<string>("")
@@ -32,6 +34,7 @@ export default function FileSharing() {
   const peerRef = useRef<any>(null)
   const connectionRef = useRef<any>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const receivedChunksRef = useRef<any[]>([])
 
   // Initialize PeerJS
   useEffect(() => {
@@ -40,7 +43,17 @@ export default function FileSharing() {
         // Dynamically import PeerJS to avoid SSR issues
         const { default: Peer } = await import("peerjs")
 
-        const newPeer = new Peer()
+        const newPeer = new Peer({
+            config: {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'stun:stun2.l.google.com:19302' },
+                    { urls: 'stun:stun3.l.google.com:19302' },
+                    { urls: 'stun:stun4.l.google.com:19302' },
+                ]
+            }
+        })
 
         newPeer.on("open", (id) => {
           setMyPeerId(id)
@@ -90,26 +103,33 @@ export default function FileSharing() {
         setTransferDirection("receiving")
         setIsTransferring(true)
         setTransferProgress(0)
+        receivedChunksRef.current = [] // Reset chunks
       } else if (data.type === "file-chunk") {
+        // Store chunk
+        receivedChunksRef.current.push(data.chunk)
+        
         // Update progress
         setTransferProgress(data.progress)
       } else if (data.type === "file-complete") {
         // File transfer complete
-        const { name, size, type, data: fileData } = data.file
+        const { name, size, type } = data.fileInfo
 
         // Convert array buffer to blob
-        const blob = new Blob([fileData], { type })
+        const blob = new Blob(receivedChunksRef.current, { type })
         const url = URL.createObjectURL(blob)
 
         setReceivedFile({ name, size, type, url })
         setIsTransferring(false)
         setTransferDirection(null)
+        receivedChunksRef.current = [] // Cleanup
       }
     })
 
     conn.on("close", () => {
       setConnectionStatus("disconnected")
       connectionRef.current = null
+      receivedChunksRef.current = []
+      setIsTransferring(false)
     })
 
     conn.on("error", (err: any) => {
@@ -117,6 +137,7 @@ export default function FileSharing() {
       setError(`Connection error: ${err.message}`)
       setConnectionStatus("disconnected")
       connectionRef.current = null
+      setIsTransferring(false)
     })
   }
 
@@ -165,29 +186,51 @@ export default function FileSharing() {
 
       // Read file as array buffer
       const buffer = await selectedFile.arrayBuffer()
+      const totalSize = buffer.byteLength
+      let offset = 0
 
-      // Send file data
-      connectionRef.current.send({
-        type: "file-chunk",
-        progress: 50, // Simplified progress for demo
-      })
+      while (offset < totalSize) {
+        const chunk = buffer.slice(offset, offset + CHUNK_SIZE)
+        offset += chunk.byteLength
+
+        // Calculate progress percentage
+        const progress = Math.round((offset / totalSize) * 100)
+
+        // Send chunk (we verify connection first to avoid crashes)
+        if (connectionRef.current) {
+            connectionRef.current.send({
+                type: "file-chunk",
+                chunk,
+                progress
+            })
+        } else {
+             throw new Error("Connection lost during transfer")
+        }
+        
+        // Small delay to prevent flooding the data channel
+        if (offset % (CHUNK_SIZE * 10) === 0) {
+            await new Promise(resolve => setTimeout(resolve, 10))
+        }
+        
+        setTransferProgress(progress)
+      }
 
       // Complete file transfer
-      connectionRef.current.send({
-        type: "file-complete",
-        file: {
-          name: selectedFile.name,
-          size: selectedFile.size,
-          type: selectedFile.type,
-          data: buffer,
-        },
-      })
+      if (connectionRef.current) {
+          connectionRef.current.send({
+            type: "file-complete",
+            fileInfo: {
+                name: selectedFile.name,
+                size: selectedFile.size,
+                type: selectedFile.type
+            }
+          })
+      }
 
-      setTransferProgress(100)
       setTimeout(() => {
         setIsTransferring(false)
         setTransferDirection(null)
-      }, 1000)
+      }, 500)
     } catch (err: any) {
       console.error("File transfer error:", err)
       setError(`File transfer failed: ${err.message}`)
