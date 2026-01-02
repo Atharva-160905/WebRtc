@@ -44,15 +44,18 @@ export default function FileSharing() {
         const { default: Peer } = await import("peerjs")
 
         const newPeer = new Peer({
-            config: {
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' },
-                    { urls: 'stun:stun2.l.google.com:19302' },
-                    { urls: 'stun:stun3.l.google.com:19302' },
-                    { urls: 'stun:stun4.l.google.com:19302' },
-                ]
-            }
+          secure: true, // IMPORTANT for Vercel/HTTPS
+          config: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' },
+              { urls: 'stun:stun2.l.google.com:19302' },
+              { urls: 'stun:stun3.l.google.com:19302' },
+              { urls: 'stun:stun4.l.google.com:19302' },
+              // If mobile data still fails, you need a TURN server here.
+              // Example: { urls: 'turn:your-turn-server.com', username: '...', credential: '...' }
+            ]
+          }
         })
 
         newPeer.on("open", (id) => {
@@ -92,7 +95,17 @@ export default function FileSharing() {
     connectionRef.current = conn
     setConnectionStatus("connecting")
 
+    // Connection timeout check
+    const timeoutId = setTimeout(() => {
+      if (connectionStatus !== "connected") {
+        setError("Connection timed out. If you are on mobile data, try checking if you are on the same WiFi network, or use a TURN server.")
+        setConnectionStatus("disconnected")
+        conn.close()
+      }
+    }, 15000) // 15s timeout
+
     conn.on("open", () => {
+      clearTimeout(timeoutId)
       setConnectionStatus("connected")
       setError(null)
     })
@@ -107,7 +120,7 @@ export default function FileSharing() {
       } else if (data.type === "file-chunk") {
         // Store chunk
         receivedChunksRef.current.push(data.chunk)
-        
+
         // Update progress
         setTransferProgress(data.progress)
       } else if (data.type === "file-complete") {
@@ -126,6 +139,7 @@ export default function FileSharing() {
     })
 
     conn.on("close", () => {
+      clearTimeout(timeoutId)
       setConnectionStatus("disconnected")
       connectionRef.current = null
       receivedChunksRef.current = []
@@ -133,6 +147,7 @@ export default function FileSharing() {
     })
 
     conn.on("error", (err: any) => {
+      clearTimeout(timeoutId)
       console.error("Connection error:", err)
       setError(`Connection error: ${err.message}`)
       setConnectionStatus("disconnected")
@@ -198,33 +213,33 @@ export default function FileSharing() {
 
         // Send chunk (we verify connection first to avoid crashes)
         if (connectionRef.current) {
-            connectionRef.current.send({
-                type: "file-chunk",
-                chunk,
-                progress
-            })
+          connectionRef.current.send({
+            type: "file-chunk",
+            chunk,
+            progress
+          })
         } else {
-             throw new Error("Connection lost during transfer")
+          throw new Error("Connection lost during transfer")
         }
-        
+
         // Small delay to prevent flooding the data channel
         if (offset % (CHUNK_SIZE * 10) === 0) {
-            await new Promise(resolve => setTimeout(resolve, 10))
+          await new Promise(resolve => setTimeout(resolve, 10))
         }
-        
+
         setTransferProgress(progress)
       }
 
       // Complete file transfer
       if (connectionRef.current) {
-          connectionRef.current.send({
-            type: "file-complete",
-            fileInfo: {
-                name: selectedFile.name,
-                size: selectedFile.size,
-                type: selectedFile.type
-            }
-          })
+        connectionRef.current.send({
+          type: "file-complete",
+          fileInfo: {
+            name: selectedFile.name,
+            size: selectedFile.size,
+            type: selectedFile.type
+          }
+        })
       }
 
       setTimeout(() => {
